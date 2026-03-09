@@ -7,11 +7,13 @@ add_executable(wasp_host main.cpp)
 
 target_include_directories(wasp_host PRIVATE /usr/local/include)
 
-target_link_libraries(wasp_host PRIVATE
-        /usr/local/lib/libwasmtime.a
-        pthread
-        dl
-        m
+find_package(libzip REQUIRED)
+
+target_link_libraries(wasp_host PRIVATE libzip::zip
+    libwasmtime.a
+    pthread
+    dl
+    m
 )
 
 target_compile_options(wasp_host PRIVATE -g -fsanitize=address)
