@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.20)
+project(wasp_host)
+
+set(CMAKE_CXX_STANDARD 20)
+
+add_executable(wasp_host main.cpp)
+
+target_include_directories(wasp_host PRIVATE /usr/local/include)
+
+target_link_libraries(wasp_host PRIVATE
+        /usr/local/lib/libwasmtime.a
+        pthread
+        dl
+        m
+)
+
+target_compile_options(wasp_host PRIVATE -g -fsanitize=address)
+target_link_options(wasp_host PRIVATE -fsanitize=address)
