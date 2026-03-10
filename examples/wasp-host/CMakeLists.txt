@@ -3,9 +3,9 @@ project(wasp_host)
 
 set(CMAKE_CXX_STANDARD 20)
 
-add_executable(wasp_host main.cpp)
+add_executable(wasp_host main.cpp wasp_host.c)
 
-target_include_directories(wasp_host PRIVATE /usr/local/include)
+target_include_directories(wasp_host PRIVATE /usr/local/include include)
 
 find_package(libzip REQUIRED)
 

@@ -1,5 +1,5 @@
 # WASP - WebAssembly Sandboxed Audio Plugin
-## Specification v0.4.0 (Draft)
+## Specification v0.5.0 (Draft)
 
 ---
 
@@ -16,6 +16,7 @@ Goals:
 - Host-neutral design, not tied to any specific DAW
 - Sample-accurate automation and MIDI via event queues
 - Fine-grained permission system for host resource access
+- Extensible capability system for optional features
 
 ---
 
@@ -55,11 +56,16 @@ The manifest is a JSON file describing the plugin to the host.
   "category": "synthesizer",
   "inputs": 0,
   "outputs": 2,
-  "midi": true,
   "ui": "ui/index.html",
+  "extensions": [
+    "wasp.midi",
+    "wasp.gui",
+    "wasp.state",
+    "wasp.latency",
+    "wasp.transport"
+  ],
   "permissions": [
     "storage.own",
-    "storage.domain",
     "network.internet",
     "files.read"
   ],
@@ -104,48 +110,107 @@ Suggested values for `category`:
 `"synthesizer"`, `"sampler"`, `"drum"`, `"filter"`, `"equalizer"`,
 `"reverb"`, `"delay"`, `"distortion"`, `"compressor"`, `"utility"`, `"other"`
 
-Hosts may use this field to organise plugins in their browser UI.
-
-[//]: # (TODO: These categories need work)
-
 ### Parameter Types
 
 - `"float"` - a continuous value between `min` and `max`.
-  Hosts should render this as a knob or slider.
-
-- `"enum"` - a discrete value represented as an integer index into `values`.
-  Hosts should render this as a dropdown or segmented control.
-  `min` and `max` are not required for enum parameters.
-  `default` is an integer index, e.g. `0` for the first value.
-
-- `"bool"` - a value of either `0.0` or `1.0`.
-  Hosts should render this as a toggle or on/off switch.
-  `min` and `max` are not required for bool parameters.
+- `"enum"` - a discrete integer index into `values`.
+- `"bool"` - `0.0` or `1.0`, rendered as a toggle.
 
 The DSP always receives parameter values as floats via the event system.
-For `enum` parameters the host passes the index as a float, e.g. `1.0` for
-the second value. Plugins should cast this to an integer internally.
+For `enum` parameters the host passes the index as a float. Plugins should
+cast to integer internally.
 
 ### Parameter Fields
-- `id` - unique integer identifier used in the DSP ABI and messaging
-- `name` - human-readable label for display in the host
-- `description` - optional longer description of the parameter
+- `id` - unique integer identifier
+- `name` - human-readable label
+- `description` - optional longer description
 - `type` - `"float"`, `"enum"`, or `"bool"`
-- `min`, `max`, `default` - value range and default value
-- `visible` - boolean, whether the host should display this parameter
-  as automatable. Defaults to `true` if omitted.
+- `min`, `max`, `default` - value range and default
+- `visible` - whether the host should expose this parameter for automation.
+  Defaults to `true` if omitted.
 
 ### Manifest Fields
-- `uniqueId` - reverse-domain unique identifier, e.g. `com.MyCompany.MyPlugin`.
-  Used by hosts to match presets to plugins and to scope permissions.
+- `uniqueId` - reverse-domain unique identifier e.g. `com.MyCompany.MyPlugin`
 - `category` - optional hint for host plugin browsers
 - `icon` - optional path to icon file within the bundle
-- `ui` - optional path to GUI entry point within the bundle
-- `permissions` - list of permissions the plugin requests. See section 8.
+- `ui` - optional path to GUI entry point. Required if `wasp.gui` is declared.
+- `extensions` - list of capability extensions. See section 4.
+- `permissions` - list of resource access permissions. See section 8.
 
 ---
 
-## 4. DSP ABI
+## 4. Extensions
+
+Extensions are optional capabilities a plugin declares in its manifest.
+The host checks the `extensions` list before calling any optional exports
+or sending any optional events. Hosts must silently ignore optional exports
+from plugins that have not declared the corresponding extension.
+
+### Core Extensions
+
+**wasp.midi**
+Plugin accepts MIDI events. The host may send `WASP_EVENT_MIDI` events.
+No additional exports required.
+
+**wasp.gui**
+Plugin has a GUI. The host should load `ui/index.html` from the bundle
+into a WebView when the user opens the plugin window.
+The manifest `ui` field must be present if this extension is declared.
+
+**wasp.state**
+Plugin manages binary state beyond parameters. Requires exports:
+```c
+uint32_t wasp_save_state(uint32_t* size_out);
+void     wasp_load_state(uint32_t data_offset, uint32_t size);
+```
+
+**wasp.latency**
+Plugin reports its processing latency. Requires export:
+```c
+uint32_t wasp_get_latency(); // returns latency in samples
+```
+The host calls this after `wasp_initialize` and after receiving
+`WASP_REQUEST_LATENCY_CHANGED`. See latency section below.
+
+**wasp.transport**
+Plugin uses transport information from `WaspProcessContext`. The host
+should populate the `transport` field accurately when this extension
+is declared. Hosts may skip populating transport for plugins that do
+not declare this extension.
+
+**wasp.tail**
+Plugin produces audio after its input stops - e.g. reverb, delay.
+Requires export:
+```c
+// Returns the tail length in samples.
+// Called by the host after the last note off or input signal ends.
+// Host continues calling wasp_process until tail expires or returns 0.
+uint32_t wasp_get_tail();
+```
+
+**wasp.requests**
+Plugin uses the outgoing request buffer to communicate with the host.
+Requires export:
+```c
+uint32_t wasp_get_request_buffer();
+```
+Required if the plugin uses any permission-gated host services
+(storage, network, files, notifications, clipboard, MIDI hardware, IPC).
+
+### Third-Party Extensions
+
+Third-party extensions follow reverse-domain naming:
+```json
+"extensions": ["com.MyCompany.my_extension"]
+```
+
+Hosts must ignore unrecognised extension identifiers. Third-party
+extensions may define their own exports, events, and request types
+using the same memory model as core extensions.
+
+---
+
+## 5. DSP ABI
 
 ### Overview
 
@@ -160,15 +225,13 @@ a single `WaspProcessContext` per audio block. This ensures:
 
 ### Memory Model
 
-WASP plugins run inside a WASM linear memory space. The host can read and write
-into this memory directly. Rather than passing pointers (which are meaningless
-across the host/plugin boundary), all references inside structs are expressed as
-`uint32_t` offsets into WASM linear memory.
+WASP plugins run inside a WASM linear memory space. The host can read and
+write into this memory directly. Rather than passing pointers, all references
+inside structs are expressed as `uint32_t` offsets into WASM linear memory.
 
-The plugin exports a function `wasp_get_process_buffer` which allocates and
-returns the offset of a `WaspProcessContext` in its own linear memory. The host
-writes into this buffer before each call to `wasp_process`. This ensures the
-plugin controls its own memory layout.
+The plugin exports `wasp_get_process_buffer` which returns the offset of a
+`WaspProcessContext` in its own linear memory. The host writes into this
+buffer before each call to `wasp_process`.
 
 ### Structs
 
@@ -181,17 +244,17 @@ typedef struct {
     uint32_t playing;        // 1 if playing, 0 if stopped
     float    bpm;            // beats per minute
     float    beat;           // current position in beats
-    uint32_t time_sig_num;   // time signature numerator e.g. 4
-    uint32_t time_sig_denom; // time signature denominator e.g. 4
+    uint32_t time_sig_num;   // time signature numerator
+    uint32_t time_sig_denom; // time signature denominator
 } WaspTransport;             // 20 bytes
 ```
 
 **WaspEvent**
 ```c
 typedef struct {
-    uint32_t type;          // event type (see Event Types below)
+    uint32_t type;          // event type
     uint32_t sample_offset; // sample offset within the current block
-    uint32_t param0;        // reinterpreted based on type
+    uint32_t param0;
     uint32_t param1;
     uint32_t param2;
     uint32_t param3;
@@ -201,31 +264,29 @@ typedef struct {
 **WaspProcessContext**
 ```c
 typedef struct {
-    uint32_t      inputs_offset;  // offset to input channel offset table
-    uint32_t      outputs_offset; // offset to output channel offset table
-    uint32_t      input_count;    // number of input channels
-    uint32_t      output_count;   // number of output channels
-    uint32_t      frames;         // number of frames in this block
-    uint32_t      sample_rate;    // current sample rate
-    uint32_t      events_offset;  // offset to WaspEvent array
-    uint32_t      event_count;    // number of events in this block
-    WaspTransport transport;      // current transport state (inline)
-} WaspProcessContext;             // 52 bytes
+    uint32_t      inputs_offset;
+    uint32_t      outputs_offset;
+    uint32_t      input_count;
+    uint32_t      output_count;
+    uint32_t      frames;
+    uint32_t      sample_rate;
+    uint32_t      events_offset;
+    uint32_t      event_count;
+    WaspTransport transport;
+} WaspProcessContext;        // 52 bytes
 ```
 
 **Channel offset tables**
 
 `inputs_offset` and `outputs_offset` point to arrays of `uint32_t`, one per
-channel, each being the offset into WASM memory of that channel's float buffer.
-
-Example for stereo output:
+channel, each being the offset of that channel's float buffer.
 ```
 outputs_offset → [uint32_t ch0_offset, uint32_t ch1_offset]
-ch0_offset     → [float, float, float, ... (frames floats)]
-ch1_offset     → [float, float, float, ... (frames floats)]
+ch0_offset     → [float, float, ... (frames floats)]
+ch1_offset     → [float, float, ... (frames floats)]
 ```
 
-### Event Types
+### Incoming Event Types
 ```c
 #define WASP_EVENT_MIDI           0
 #define WASP_EVENT_PARAM          1
@@ -234,25 +295,25 @@ ch1_offset     → [float, float, float, ... (frames floats)]
 #define WASP_EVENT_NETWORK_RESULT 4
 ```
 
-**WASP_EVENT_MIDI**
+**WASP_EVENT_MIDI** - requires `wasp.midi`
 ```
-param0 = status byte (e.g. 0x90 for note on)
-param1 = data1      (e.g. MIDI note number)
-param2 = data2      (e.g. velocity)
+param0 = status byte
+param1 = data1
+param2 = data2
 param3 = unused
 ```
 
 **WASP_EVENT_PARAM**
 ```
 param0 = parameter id
-param1 = value reinterpreted as float bits (use memcpy to convert safely)
+param1 = value as float bits (use memcpy to convert)
 param2 = unused
 param3 = unused
 ```
 
 **WASP_EVENT_STORAGE_RESULT**
 ```
-param0 = request id (matched to original request)
+param0 = request id
 param1 = offset of result string in WASM memory (UTF-8)
 param2 = length of result string in bytes
 param3 = 1 if found, 0 if key did not exist
@@ -274,174 +335,122 @@ param2 = offset of response body in WASM memory
 param3 = length of response body in bytes
 ```
 
-### Host Request Events
+### Outgoing Request Types
 
-Plugins send requests to the host by writing request events into a separate
-outgoing event buffer. The host reads this buffer after each `wasp_process`
-call and fulfils requests asynchronously, returning results as events in a
-future block.
+Requires `wasp.requests`. Plugin writes these into the outgoing request
+buffer returned by `wasp_get_request_buffer`. The host reads this buffer
+after each `wasp_process` call.
 ```c
-#define WASP_REQUEST_STORAGE_GET  0
-#define WASP_REQUEST_STORAGE_SET  1
-#define WASP_REQUEST_FILE_OPEN    2
-#define WASP_REQUEST_FILE_SAVE    3
-#define WASP_REQUEST_NETWORK_GET  4
-#define WASP_REQUEST_NETWORK_POST 5
-#define WASP_REQUEST_NOTIFY       6
-#define WASP_REQUEST_CLIPBOARD_READ  7
-#define WASP_REQUEST_CLIPBOARD_WRITE 8
+#define WASP_REQUEST_STORAGE_GET        0
+#define WASP_REQUEST_STORAGE_SET        1
+#define WASP_REQUEST_FILE_OPEN          2
+#define WASP_REQUEST_FILE_SAVE          3
+#define WASP_REQUEST_NETWORK_GET        4
+#define WASP_REQUEST_NETWORK_POST       5
+#define WASP_REQUEST_NOTIFY             6
+#define WASP_REQUEST_CLIPBOARD_READ     7
+#define WASP_REQUEST_CLIPBOARD_WRITE    8
+#define WASP_REQUEST_LATENCY_CHANGED    9
+#define WASP_REQUEST_TAIL_CHANGED       10
 ```
 
-The outgoing event buffer offset is returned by `wasp_get_request_buffer`.
-Its layout mirrors the incoming event buffer - a count followed by an array
-of `WaspEvent` structs, reinterpreted for request types.
+**WASP_REQUEST_LATENCY_CHANGED** - requires `wasp.latency`
+```
+param0 = new latency in samples (informational)
+param1 = unused
+param2 = unused
+param3 = unused
+```
+Host must call `wasp_get_latency` to confirm the new value.
 
-### Exported Functions
+**WASP_REQUEST_TAIL_CHANGED** - requires `wasp.tail`
+```
+param0 = new tail length in samples (informational)
+param1 = unused
+param2 = unused
+param3 = unused
+```
+Host must call `wasp_get_tail` to confirm the new value.
 
-The WASM module must export the following functions:
+### Required Exported Functions
 ```c
-// Called once when the plugin is loaded.
-// Returns 1 on success, 0 on failure.
+// Called once when the plugin is loaded. Returns 1 on success, 0 on failure.
 int32_t wasp_initialize(uint32_t sample_rate, uint32_t max_block_size);
 
-// Returns the offset in WASM linear memory of the plugin's WaspProcessContext.
-// The host writes into this buffer before each call to wasp_process.
+// Returns offset of WaspProcessContext in WASM linear memory.
 uint32_t wasp_get_process_buffer();
 
-// Returns the offset of the plugin's outgoing request buffer.
-// The host reads this after each wasp_process call.
-uint32_t wasp_get_request_buffer();
-
 // Called once per audio block.
-// ctx_offset is the value returned by wasp_get_process_buffer.
 void wasp_process(uint32_t ctx_offset);
-
-// Called by the host to save plugin state.
-// Returns offset of state data; writes size in bytes to size_out.
-uint32_t wasp_save_state(uint32_t* size_out);
-
-// Called by the host to restore plugin state.
-void wasp_load_state(uint32_t data_offset, uint32_t size);
 
 // Called when the plugin is unloaded.
 void wasp_terminate();
 ```
 
-###  Latency
-
-Some plugins introduce a fixed delay between input and output — for example,
-a lookahead compressor or an FFT-based effect. Hosts must compensate for this
-delay to keep tracks in sync. WASP exposes latency via an optional export and
-a request event.
-
-#### Reporting Latency
-
-Plugins that introduce latency export the following function:
+### Optional Exported Functions
 ```c
-// Returns the plugin's current latency in samples.
-// Optional export. If absent, the host assumes zero latency.
+// wasp.requests
+uint32_t wasp_get_request_buffer();
+
+// wasp.state
+uint32_t wasp_save_state(uint32_t* size_out);
+void     wasp_load_state(uint32_t data_offset, uint32_t size);
+
+// wasp.latency
 uint32_t wasp_get_latency();
+
+// wasp.tail
+uint32_t wasp_get_tail();
 ```
 
-The host calls `wasp_get_latency` once after `wasp_initialize` and caches
-the result. The host must re-read latency whenever it receives a
-`WASP_REQUEST_LATENCY_CHANGED` request from the plugin.
-
-Plugins must not change their latency arbitrarily during playback. Latency
-changes should only occur in response to parameter changes that affect
-processing block size or algorithm (e.g. FFT size, lookahead duration).
-
-#### Notifying the Host of Latency Changes
-
-If a plugin's latency changes at runtime it must notify the host by writing
-a request event into the outgoing request buffer:
-```c
-#define WASP_REQUEST_LATENCY_CHANGED 9
-
-// param0 = new latency in samples (informational, host should verify
-//          by calling wasp_get_latency)
-// param1 = unused
-// param2 = unused
-// param3 = unused
-```
-
-The host reads the outgoing request buffer after each `wasp_process` call.
-Upon receiving `WASP_REQUEST_LATENCY_CHANGED` the host must call
-`wasp_get_latency` to get the new value and update its compensation
-accordingly.
-
-#### Host Responsibilities
-
-- The host must call `wasp_get_latency` after `wasp_initialize` if the
-  export is present.
-- The host must delay all parallel signal paths by the difference between
-  the highest latency plugin in the graph and each other plugin's latency,
-  keeping the mix time-aligned.
-- The host must re-read latency after receiving `WASP_REQUEST_LATENCY_CHANGED`
-  and update compensation without introducing audible glitches where possible.
-- Hosts that do not support latency compensation must still call
-  `wasp_get_latency` if present and may display the value to the user as
-  an informational label (e.g. "Latency: 512 samples").
-
-#### Plugin Responsibilities
-
-- Plugins with zero latency must not export `wasp_get_latency`.
-- Plugins must not change latency more frequently than necessary.
-- Latency must be reported in samples, not milliseconds, since the sample
-  rate is known to both host and plugin at initialisation time.
-- Plugins must return a consistent value from `wasp_get_latency` between
-  latency change notifications. The host may cache this value aggressively.
-
-#### Notes
-
-- Latency compensation is a host-side concern. The plugin simply reports
-  its latency and produces audio normally — it does not need to know
-  whether the host is compensating.
-- A plugin's latency may legitimately be zero even if it does internal
-  buffering, as long as that buffering does not delay the output relative
-  to the input.
-- Latency is always a whole number of samples. Fractional sample latency
-  is not supported.
-- `wasp_save_state`, `wasp_load_state`, and `wasp_get_request_buffer` are
-  optional exports. Hosts must function correctly if they are absent.
+### Processing Rules
 - The host must not call `wasp_process` from multiple threads simultaneously.
-- The host must sort incoming events by `sample_offset` before writing them
-  into the context buffer.
-- Block size may vary between calls. Plugins must not assume a fixed size.
-- Hosts must ignore request events for permissions the plugin has not declared
-  in its manifest.
+- The host must sort incoming events by `sample_offset` before writing them.
+- Block size may vary between calls.
+- The host must only call optional exports if the corresponding extension
+  is declared in the manifest.
+- The host must ignore outgoing request events for undeclared extensions.
+
+### Latency
+
+Plugins with zero latency must not declare `wasp.latency`. The host assumes
+zero latency for plugins that do not declare this extension.
+
+Plugins must not change latency arbitrarily during playback. Latency changes
+should only occur in response to parameter changes that affect processing
+algorithm (e.g. FFT size, lookahead duration).
+
+Latency is always reported in whole samples. Fractional sample latency is
+not supported.
+
+The host must compensate for reported latency by delaying parallel signal
+paths to keep the mix time-aligned.
 
 ---
 
-## 5. GUI
+## 6. GUI
 
 The GUI is an HTML page rendered inside a WebView provided by the host.
-It communicates with the DSP via the host messaging API. The GUI is optional -
-hosts must work correctly without it.
+Requires `wasp.gui` extension. The GUI is optional - hosts must work
+correctly without it.
 
 ### Host JavaScript API
-
-The host injects a global `wasp` object into the WebView:
 ```javascript
-// Send a message to the host
 wasp.send({ type: "parameter", id: 0, value: 1200.0 });
 
-// Receive messages from the host
 wasp.onmessage = (msg) => {
-    if (msg.type === "parameter") {
-        // update UI to reflect parameter change
-    }
+    if (msg.type === "parameter") { ... }
 };
 ```
 
 ### Message Types
 
-**parameter** - a parameter value change
+**parameter**
 ```json
 { "type": "parameter", "id": 0, "value": 1200.0 }
 ```
 
-**transport** - host playback state
+**transport** - only sent if `wasp.transport` is declared
 ```json
 {
     "type": "transport",
@@ -453,64 +462,47 @@ wasp.onmessage = (msg) => {
 }
 ```
 
-**midi** - a MIDI event
+**midi** - only sent if `wasp.midi` is declared
 ```json
 { "type": "midi", "status": 144, "data1": 60, "data2": 100 }
 ```
 
 ### Notes
-- The GUI must not assume it is always visible. Hosts may close and reopen
-  the GUI window at any time.
-- Parameter changes from the host (e.g. automation) will arrive via
-  `wasp.onmessage`. The GUI should reflect these changes.
-- Heavy visual processing (spectrum analysers, oscilloscopes) should be
-  driven by periodic polling rather than per-sample messages.
+- The GUI must not assume it is always visible.
+- Parameter changes from automation will arrive via `wasp.onmessage`.
+- Heavy visual processing should be driven by periodic polling.
 
 ---
 
-## 6. State, Session & Presets
+## 7. State, Session & Presets
 
 ### State Model
 
-WASP separates plugin state into two layers:
+**Parameter state** - always managed by the host. The basis for automation
+and presets.
 
-**Parameter state** - the set of all parameter values as defined in the
-manifest. This is always managed by the host, is human-readable, and is
-the basis for automation and presets.
+**Binary state** - requires `wasp.state`. Arbitrary plugin-managed data
+returned by `wasp_save_state`. Opaque to the host.
 
-**Binary state** - arbitrary plugin-managed data returned by
-`wasp_save_state`. This may include internal state that has no corresponding
-parameter - for example, a sequencer's step data, a sampler's loaded file
-path, or an arpeggiator pattern. This is opaque to the host.
+On restore, the host must:
+1. Inject all parameter values as `WASP_EVENT_PARAM` events at the start
+   of the first block after `wasp_initialize`.
+2. Call `wasp_load_state` with the binary blob if `wasp.state` is declared.
 
-Hosts that support binary state must:
-1. Call `wasp_save_state` and store the returned blob alongside parameter state.
-2. On restore, first inject all parameter values as `WASP_EVENT_PARAM` events
-   at the start of the first block, then call `wasp_load_state` with the blob.
-
-Hosts that do not support binary state must fall back to parameter-only
-restore. Plugins must remain functional under parameter-only restore, even
-if some internal state is lost.
+Hosts that do not support binary state fall back to parameter-only restore.
+Plugins must remain functional under parameter-only restore.
 
 ### Session State
 
-When saving a project the host saves:
-- All parameter values from its own parameter model
-- The binary blob from `wasp_save_state` if exported
-
-Session state format is host-defined. Hosts are not required to use
-`.wpreset` for internal project saves. The session binary blob may differ
-from the preset binary blob - plugins may choose to include additional
-session-only data (e.g. UI state, undo history) that is not appropriate
-for a shareable preset.
+Session state format is host-defined. The session binary blob may differ
+from the preset binary blob - plugins may include session-only data
+(UI state, undo history) not appropriate for a shareable preset.
 
 ### Preset Format
-
-Presets are stored as `.wpreset` files. A `.wpreset` is a ZIP archive:
 ```
-mypreset.wpreset
+mypreset.wpreset  (ZIP)
 ├── preset.json
-└── blob.bin        (optional)
+└── blob.bin      (optional, requires wasp.state)
 ```
 
 **preset.json**
@@ -528,134 +520,94 @@ mypreset.wpreset
 }
 ```
 
-**blob.bin**
-
-Optional. Raw binary data returned by `wasp_save_state` at the time the
-preset was saved. The host passes this to `wasp_load_state` after restoring
-parameters. If present but the plugin does not export `wasp_load_state`,
-the host must ignore it silently.
-
-### Preset Fields
-- `pluginUniqueId` - must match the plugin's `uniqueId` in the manifest
-- `pluginVersion` - the version of the plugin this preset was saved with
-- `presetVersion` - the version of the preset format, currently `"0.1.0"`
-- `name` - human-readable preset name
-- `author` - optional
-
-Hosts should warn the user if `pluginVersion` does not match the installed
-version of the plugin. Hosts must not refuse to load a preset on this basis.
-
----
-
-## 7. Sandbox Rules
-
-WASP plugins run inside a WASM sandbox. Plugins:
-- Must not require direct filesystem access
-- Must not require direct network access
-- Must not rely on OS-specific behaviour
-- Must not access other plugins' storage without explicit user permission
-- May request host-mediated access to resources via the permission system
-
-These restrictions are enforced by the WASM runtime. They are a feature,
-not a limitation - they guarantee plugins cannot crash or compromise the host.
+Hosts should warn if `pluginVersion` does not match the installed version.
+Hosts must not refuse to load a preset on this basis.
 
 ---
 
 ## 8. Permissions
 
 Plugins declare required permissions in their manifest. The host presents
-these to the user when the plugin is first loaded. Users may grant or deny
-permissions individually. Hosts must not fulfil requests for permissions
-the plugin has not declared, and must silently ignore such requests.
+these to the user when the plugin is first loaded. Hosts must not fulfil
+requests for undeclared permissions and must silently ignore such requests.
+
+All permission-gated features require `wasp.requests`.
 
 ### Permission Types
 
 **Storage**
 
 - `storage.own` - implicit, always granted. Plugin can read and write its
-  own storage. Data is stored by the host at a conventional location:
-  - Linux: `~/.config/wasp/com.MyCompany.MyPlugin/`
-  - Windows: `%APPDATA%\wasp\com.MyCompany.MyPlugin\`
-  - macOS: `~/Library/Application Support/wasp/com.MyCompany.MyPlugin\`
-  - Web: host-defined (e.g. localStorage or server-side)
-  - mobile: host-defined
+  own storage at:
+  - Linux: `~/WASP/data/com.MyCompany.MyPlugin/`
+  - Windows: `C:\Users\[user]\WASP\data\com.MyCompany.MyPlugin\`
+  - macOS: `~/WASP/data/com.MyCompany.MyPlugin\`
+  - iOS: `[Host]/Application Support/wasp/com.MyCompany.MyPlugin/`
+  - Android: `[Host]/files/wasp/com.MyCompany.MyPlugin/`
+  - Web: host-defined
 
-- `storage.domain` - requires user approval. Plugin can read and write
-  storage for all plugins sharing its domain prefix.
-  e.g. `com.MyCompany.MyPlugin` may access `com.MyCompany.*/`.
-  Host prompt: *"[Plugin] is requesting access to shared storage for all
-  [com.MyCompany] plugins."*
+- `storage.domain` - requires user approval. Access to all storage under
+  the plugin's domain prefix e.g. `com.MyCompany.*`.
 
 **Network**
 
-- `network.internet` - requires user approval. Plugin may request the host
-  make HTTP/HTTPS calls on its behalf. Hosts should display the domains
-  a plugin intends to contact at permission grant time if declared in the
-  manifest. Hosts may show a warning if a plugin attempts to contact an
-  undeclared domain.
+- `network.internet` - requires user approval. Plugin may request HTTP/HTTPS
+  calls via the host.
 
 **Files**
 
-- `files.read` - requires user approval. Plugin may request the host open
-  a file picker and return file contents. The host always presents a native
-  file dialog - plugins cannot request arbitrary paths directly.
+- `files.read` - requires user approval. Plugin may request a host file
+  picker and receive file contents.
 
-- `files.write` - requires user approval. Plugin may request the host open
-  a save dialog and write data to a user-chosen location.
+- `files.write` - requires user approval. Plugin may request a host save
+  dialog and write data to a user-chosen location.
 
 - `audio.decode` - requires user approval. Plugin may request the host
-  decode an audio file into raw PCM samples. The host handles format
-  support - the plugin receives raw floats regardless of source format.
+  decode an audio file into raw PCM samples.
 
 **MIDI Hardware**
 
-- `midi.input` - requires user approval. Plugin may receive events from
-  external MIDI devices connected to the host.
+- `midi.hardware.input` - requires user approval. Plugin may receive from
+  external MIDI devices.
 
-- `midi.output` - requires user approval. Plugin may send MIDI events to
-  external MIDI devices connected to the host.
+- `midi.hardware.output` - requires user approval. Plugin may send to
+  external MIDI devices.
 
 **Inter-plugin Communication**
 
-- `ipc.domain` - requires user approval. Plugin may send and receive
-  messages from other loaded plugins sharing its domain prefix.
-  Plugins outside the domain cannot be contacted.
+- `ipc.domain` - requires user approval. Plugin may communicate with other
+  loaded plugins sharing its domain prefix.
 
 **UI**
 
 - `notifications` - requires user approval. Plugin may ask the host to
-  display a notification to the user. Hosts may rate-limit or suppress
-  notifications at their discretion.
+  display a notification.
 
-- `clipboard.read` - requires user approval. Plugin may request the
-  current clipboard contents from the host.
+- `clipboard.read` - requires user approval.
 
-- `clipboard.write` - requires user approval. Plugin may ask the host
-  to write data to the clipboard.
+- `clipboard.write` - requires user approval.
 
 ### Permission Guidelines for Hosts
 
-- Permissions must be presented clearly to the user before being granted.
-- Hosts should allow users to review and revoke permissions at any time.
-- `storage.own` must always be granted and must not require user interaction.
-- Hosts must silently ignore requests from plugins for undeclared permissions.
-- Hosts should log permission requests and fulfilments for auditability.
-- For `network.internet`, hosts should consider showing the user which
-  domains are being contacted to protect against data exfiltration.
+- `storage.own` must always be granted without user interaction.
+- Permissions must be presented clearly before being granted.
+- Users must be able to review and revoke permissions at any time.
+- Hosts must silently ignore requests for undeclared permissions.
+- For `network.internet`, hosts should log domains contacted.
+- Hosts must ignore all permission-gated requests if `wasp.requests`
+  is not declared.
 
 ---
+
 ## 9. Installation & Storage Locations
 
 ### Plugin Installation
 
-WASP plugins are installed as `.wasp` files into the user's WASP directory.
-The WASP directory is located at `~/WASP/` on all desktop platforms:
+WASP plugins are installed into `~/WASP/plugins/` on all desktop platforms:
 
 - Linux: `~/WASP/`
 - Windows: `C:\Users\[username]\WASP\`
 - macOS: `~/WASP/`
-
-The WASP directory has the following structure:
 ```
 ~/WASP/
 ├── plugins/      ← installed .wasp bundles
@@ -666,54 +618,43 @@ The WASP directory has the following structure:
 └── cache/        ← host-managed cache, safe to delete
 ```
 
-Hosts must scan `~/WASP/plugins/` for installed plugins on startup.
-Hosts may also support additional scan paths configured by the user.
-
-### Global Plugin Storage
-
-Plugin storage via `storage.own` is written to `~/WASP/data/[uniqueId]/`
-on all desktop platforms. Using a consistent path across platforms and hosts
-ensures that data such as login tokens and user preferences persists
-correctly when a user switches between DAWs.
-
-| Platform | Path                                                    |
-| -------- | ------------------------------------------------------- |
-| Linux    | `~/WASP/data/com.MyCompany.MyPlugin/`                   |
-| Windows  | `C:\Users\[username]\WASP\data\com.MyCompany.MyPlugin\` |
-| macOS    | `~/WASP/data/com.MyCompany.MyPlugin\`                   |
-
-`storage.domain` access extends this to `~/WASP/data/com.MyCompany.*/`
-with user approval.
+Hosts must scan `~/WASP/plugins/` on startup.
+Hosts may support additional scan paths configured by the user.
 
 ### Mobile Platforms
 
-Mobile operating systems do not permit shared storage between apps.
-On mobile platforms, global plugin storage is scoped to the host app:
+On mobile, global storage is scoped to the host app:
 
-- iOS: `[Host App]/Application Support/wasp/[uniqueId]/`
-- Android: `[Host App]/files/wasp/[uniqueId]/`
+- iOS: `[Host]/Application Support/wasp/[uniqueId]/`
+- Android: `[Host]/files/wasp/[uniqueId]/`
 
-As a result, `storage.own` and `storage.domain` on mobile mean "shared
-within the same host app" rather than "shared across all DAWs on the
-device". Plugins that rely on cross-host persistent storage (e.g. for
-licence verification) should be aware of this limitation and handle it
-gracefully.
+`storage.own` and `storage.domain` on mobile mean "shared within the same
+host app" rather than across all DAWs. Plugins relying on cross-host
+persistent storage must handle this gracefully.
 
 ### Web Platforms
 
-Web hosts have no access to the local filesystem. Global plugin storage
-on web platforms is host-defined. Hosts should use a consistent key
-namespace based on the plugin's `uniqueId` to avoid collisions:
+Web hosts have no local filesystem access. Storage is host-defined:
 
 - Recommended: `localStorage` key prefix `wasp.[uniqueId].`
-- Or a server-side store keyed by `uniqueId` if the host has a backend
+- Or server-side store keyed by `uniqueId`
 
-Plugin installation on web platforms is also host-defined. Hosts may
-load `.wasp` bundles from a URL, a server-side registry, or a local
-file picker.
+Plugin installation on web is host-defined.
 
 ---
-## 10. Open Questions
+
+## 10. Sandbox Rules
+
+WASP plugins run inside a WASM sandbox. Plugins:
+- Must not require direct filesystem access
+- Must not require direct network access
+- Must not rely on OS-specific behaviour
+- Must not access other plugins' storage without explicit user permission
+- May request host-mediated access to resources via the permission system
+
+---
+
+## 11. Open Questions
 
 - [ ] Threading model - can plugins spawn their own threads?
 - [ ] Plugin versioning and compatibility guarantees
@@ -721,10 +662,11 @@ file picker.
 - [ ] In-process vs sandboxed process execution model
 - [ ] MPE support
 - [ ] Note expression events
-- [ ] Global storage on web platforms - localStorage vs server-side
-- [ ] Network permission: should hosts enforce a domain allowlist declared
-      in the manifest, or just warn on undeclared domains?
+- [ ] Global storage on web platforms
+- [ ] Network permission: enforce domain allowlist or warn on undeclared domains?
 - [ ] IPC event format - how are inter-plugin messages structured?
 - [ ] Storage size limits per plugin
-- [ ] Permission revocation behaviour - what happens to a running plugin
-      if the user revokes a permission mid-session?
+- [ ] Permission revocation behaviour mid-session
+- [ ] Should hosts be required to support latency compensation or is it optional?
+- [ ] Third-party extension registry - should there be a central registry
+  to avoid extension ID collisions?

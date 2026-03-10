@@ -1,6 +1,6 @@
 {
   "name": "Sting",
-  "uniqueId": "com.WASP.Sting",
+  "uniqueId": "audio.wasp.Sting",
   "description": "An aswesome synthesizer",
   "icon": "icon.png",
   "version": "0.1.0",
