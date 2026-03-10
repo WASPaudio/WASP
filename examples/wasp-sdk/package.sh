@@ -10,9 +10,9 @@ if [ "$PROFILE" != "debug" ] && [ "$PROFILE" != "release" ]; then
     exit 1
 fi
 
-WASM="target/wasm32-unknown-unknown/$PROFILE/wasp_sine.wasm"
+WASM="target/wasm32-unknown-unknown/$PROFILE/Sting.wasm"
 MANIFEST="manifest.json"
-OUT="target/wasm32-unknown-unknown/$PROFILE/wasp_sine.wasp"
+OUT="target/wasm32-unknown-unknown/$PROFILE/Sting.wasp"
 STAGING="target/wasp_staging"
 
 if [ ! -f "$WASM" ]; then

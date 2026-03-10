@@ -1,5 +1,5 @@
 # WASP - WebAssembly Sandboxed Audio Plugin
-## Specification v0.3.0 (Draft)
+## Specification v0.4.0 (Draft)
 
 ---
 
@@ -10,7 +10,7 @@ built on WebAssembly and web technologies. Plugins consist of a WASM DSP module
 and an optional HTML/CSS/JS GUI, packaged together in a `.wasp` bundle.
 
 Goals:
-- True cross-platform support (Linux, Windows, macOS, web, mobile) from a single binary
+- True cross-platform support (Windows, Linux, macOS, web, mobile) from a single binary
 - Sandboxed execution - plugins cannot crash the host
 - Simple, approachable developer experience
 - Host-neutral design, not tied to any specific DAW
@@ -327,7 +327,81 @@ void wasp_load_state(uint32_t data_offset, uint32_t size);
 void wasp_terminate();
 ```
 
-### Notes
+###  Latency
+
+Some plugins introduce a fixed delay between input and output — for example,
+a lookahead compressor or an FFT-based effect. Hosts must compensate for this
+delay to keep tracks in sync. WASP exposes latency via an optional export and
+a request event.
+
+#### Reporting Latency
+
+Plugins that introduce latency export the following function:
+```c
+// Returns the plugin's current latency in samples.
+// Optional export. If absent, the host assumes zero latency.
+uint32_t wasp_get_latency();
+```
+
+The host calls `wasp_get_latency` once after `wasp_initialize` and caches
+the result. The host must re-read latency whenever it receives a
+`WASP_REQUEST_LATENCY_CHANGED` request from the plugin.
+
+Plugins must not change their latency arbitrarily during playback. Latency
+changes should only occur in response to parameter changes that affect
+processing block size or algorithm (e.g. FFT size, lookahead duration).
+
+#### Notifying the Host of Latency Changes
+
+If a plugin's latency changes at runtime it must notify the host by writing
+a request event into the outgoing request buffer:
+```c
+#define WASP_REQUEST_LATENCY_CHANGED 9
+
+// param0 = new latency in samples (informational, host should verify
+//          by calling wasp_get_latency)
+// param1 = unused
+// param2 = unused
+// param3 = unused
+```
+
+The host reads the outgoing request buffer after each `wasp_process` call.
+Upon receiving `WASP_REQUEST_LATENCY_CHANGED` the host must call
+`wasp_get_latency` to get the new value and update its compensation
+accordingly.
+
+#### Host Responsibilities
+
+- The host must call `wasp_get_latency` after `wasp_initialize` if the
+  export is present.
+- The host must delay all parallel signal paths by the difference between
+  the highest latency plugin in the graph and each other plugin's latency,
+  keeping the mix time-aligned.
+- The host must re-read latency after receiving `WASP_REQUEST_LATENCY_CHANGED`
+  and update compensation without introducing audible glitches where possible.
+- Hosts that do not support latency compensation must still call
+  `wasp_get_latency` if present and may display the value to the user as
+  an informational label (e.g. "Latency: 512 samples").
+
+#### Plugin Responsibilities
+
+- Plugins with zero latency must not export `wasp_get_latency`.
+- Plugins must not change latency more frequently than necessary.
+- Latency must be reported in samples, not milliseconds, since the sample
+  rate is known to both host and plugin at initialisation time.
+- Plugins must return a consistent value from `wasp_get_latency` between
+  latency change notifications. The host may cache this value aggressively.
+
+#### Notes
+
+- Latency compensation is a host-side concern. The plugin simply reports
+  its latency and produces audio normally — it does not need to know
+  whether the host is compensating.
+- A plugin's latency may legitimately be zero even if it does internal
+  buffering, as long as that buffering does not delay the output relative
+  to the input.
+- Latency is always a whole number of samples. Fractional sample latency
+  is not supported.
 - `wasp_save_state`, `wasp_load_state`, and `wasp_get_request_buffer` are
   optional exports. Hosts must function correctly if they are absent.
 - The host must not call `wasp_process` from multiple threads simultaneously.

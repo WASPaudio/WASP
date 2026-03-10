@@ -1,7 +1,7 @@
 {
-  "name": "MyPlugin",
-  "uniqueId": "com.MyCompany.MyPlugin",
-  "description": "An awesome plugin",
+  "name": "Sting",
+  "uniqueId": "com.WASP.Sting",
+  "description": "An aswesome synthesizer",
   "icon": "icon.png",
   "version": "0.1.0",
   "author": "",

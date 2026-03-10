@@ -216,7 +216,7 @@ int main() {
     // Load from .wasp bundle
     size_t wasm_size = 0;
     uint8_t* wasm_bytes = load_wasm_from_bundle(
-        "../../wasp-sdk/target/wasm32-unknown-unknown/debug/wasp_sine.wasp",
+        "../../wasp-sdk/target/wasm32-unknown-unknown/debug/Sting.wasp",
         &wasm_size);
     if (!wasm_bytes) return 1;
 
