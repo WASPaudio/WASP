@@ -21,16 +21,16 @@
 #define WASP_MAX_PARAMS      256
 #define WASP_WASM_BASE_OFFSET 1024  /* low memory reserved for host buffers */
 
-static void* wasp_malloc(size_t size) {
-    void* p = malloc(size);
-    if (!p) fprintf(stderr, "wasp_host: out of memory\n");
-    return p;
-}
+// static void* wasp_malloc(size_t size) {
+//     void* p = malloc(size);
+//     if (!p) fprintf(stderr, "wasp_host: out of memory\n");
+//     return p;
+// }
 
 static char* wasp_strdup(const char* s) {
     if (!s) return NULL;
     size_t len = strlen(s) + 1;
-    char* copy = (char*)wasp_malloc(len);
+    char* copy = WASP_MALLOC(char*, len);
     if (copy) memcpy(copy, s, len);
     return copy;
 }
@@ -166,7 +166,7 @@ static uint8_t* bundle_read_file(const char* bundle_path, const char* filename,
         return NULL;
     }
 
-    uint8_t* buf = (uint8_t*)wasp_malloc(stat.size);
+    uint8_t* buf = WASP_MALLOC(uint8_t*, stat.size);
     if (!buf) { zip_fclose(file); zip_close(zip); return NULL; }
 
     zip_fread(file, buf, stat.size);
@@ -203,7 +203,7 @@ struct WaspEngine {
 };
 
 WaspEngine* wasp_engine_create() {
-    WaspEngine* engine = (WaspEngine*)wasp_malloc(sizeof(WaspEngine));
+    WaspEngine* engine = WASP_MALLOC(WaspEngine*, sizeof(WaspEngine));
     if (!engine) return NULL;
 
     engine->wasm_engine = wasm_engine_new();
@@ -301,7 +301,7 @@ static bool parse_param(const char* param_json, WaspParamDescriptor* p) {
         const char* arr = json_find_key(param_json, "values");
         if (arr) {
             /* allocate a temporary enum values array */
-            char**   enum_vals = (char**)wasp_malloc(64 * sizeof(char*));
+            char**   enum_vals = WASP_MALLOC(char**, 64 * sizeof(char*));
             uint32_t enum_count = 0;
             if (enum_vals) {
                 StringArrayCtx ctx = { enum_vals, &enum_count, 64 };
@@ -321,13 +321,13 @@ WaspManifest* wasp_manifest_load(const char* bundle_path) {
     if (!json_bytes) return NULL;
 
     /* null-terminate */
-    char* json = (char*)wasp_malloc(json_size + 1);
+    char* json = WASP_MALLOC(char*, json_size + 1);
     if (!json) { free(json_bytes); return NULL; }
     memcpy(json, json_bytes, json_size);
     json[json_size] = '\0';
     free(json_bytes);
 
-    WaspManifest* m = (WaspManifest*)wasp_malloc(sizeof(WaspManifest));
+    WaspManifest* m = WASP_MALLOC(WaspManifest*, sizeof(WaspManifest));
     if (!m) { free(json); return NULL; }
     memset(m, 0, sizeof(*m));
 
@@ -527,7 +527,7 @@ static bool get_export_memory(wasmtime_store_t* store, wasmtime_instance_t* inst
 WaspInstance* wasp_instance_create(WaspEngine* engine, const char* bundle_path) {
     if (!engine || !bundle_path) return NULL;
 
-    WaspInstance* inst = (WaspInstance*)wasp_malloc(sizeof(WaspInstance));
+    WaspInstance* inst = WASP_MALLOC(WaspInstance*, sizeof(WaspInstance));
     if (!inst) return NULL;
     memset(inst, 0, sizeof(*inst));
     inst->engine = engine;
@@ -665,20 +665,27 @@ WaspError wasp_instance_initialize(WaspInstance* inst,
     args[0].kind = WASMTIME_I32; args[0].of.i32 = (int32_t)sample_rate;
     args[1].kind = WASMTIME_I32; args[1].of.i32 = (int32_t)max_block_size;
 
+    wasmtime_val_t init_result;
+    init_result.kind = WASMTIME_I32;
     if (!wasp_call_fn(inst->engine->store, inst->fn_initialize,
-                      args, 2, NULL, 0, "wasp_initialize")) {
+                      args, 2, &init_result, 1, "wasp_initialize")) {
+        inst->last_error = WASP_ERROR_PROCESS_FAILED;
+        return WASP_ERROR_PROCESS_FAILED;
+                      }
+
+    if (init_result.of.i32 == 0) {
+        fprintf(stderr, "wasp_host: wasp_initialize returned failure\n");
         inst->last_error = WASP_ERROR_PROCESS_FAILED;
         return WASP_ERROR_PROCESS_FAILED;
     }
 
-    /* get the process context buffer offset */
     wasmtime_val_t result;
     result.kind = WASMTIME_I32;
     if (!wasp_call_fn(inst->engine->store, inst->fn_get_process_buffer,
                       NULL, 0, &result, 1, "wasp_get_process_buffer")) {
         inst->last_error = WASP_ERROR_PROCESS_FAILED;
         return WASP_ERROR_PROCESS_FAILED;
-    }
+                      }
     inst->ctx_offset = (uint32_t)result.of.i32;
 
     inst->last_error = WASP_OK;
@@ -690,9 +697,6 @@ void wasp_instance_terminate(WaspInstance* inst) {
     wasp_call_fn(inst->engine->store, inst->fn_terminate,
                  NULL, 0, NULL, 0, "wasp_terminate");
 }
-
-WaspError wasp_instance_process(WaspInstance* inst, WaspProcessBuffer* buffer);
-/* implemented after WaspProcessBuffer */
 
 uint32_t wasp_instance_get_latency(WaspInstance* inst) {
     if (!inst || !inst->has_get_latency) return 0;
@@ -735,7 +739,7 @@ uint8_t* wasp_instance_save_state(WaspInstance* inst, uint32_t* size_out) {
 
     if (data_size == 0) return NULL;
 
-    uint8_t* copy = (uint8_t*)wasp_malloc(data_size);
+    uint8_t* copy = WASP_MALLOC(uint8_t*, data_size);
     if (!copy) return NULL;
     memcpy(copy, wasm_mem + data_offset, data_size);
     *size_out = data_size;
@@ -776,8 +780,10 @@ struct WaspProcessBuffer {
     uint32_t sample_rate;
 
     /* WASM memory offsets */
-    uint32_t ch_offsets[16];    /* per-channel buffer offsets in WASM memory */
-    uint32_t ch_table_offset;   /* offset of the channel offset table */
+    uint32_t out_ch_offsets[16];    /* per-channel buffer offsets in WASM memory */
+    uint32_t out_ch_table_offset;   /* offset of the channel offset table */
+    uint32_t in_ch_offsets[16];
+    uint32_t in_ch_table_offset;   /* offset of the channel offset table */
     uint32_t events_offset;     /* offset of the events array */
 
     /* host-side staging for events before commit */
@@ -808,7 +814,7 @@ WaspProcessBuffer* wasp_process_buffer_create(WaspInstance* instance,
                                                uint32_t num_channels) {
     if (!instance || num_channels == 0 || num_channels > 16) return NULL;
 
-    WaspProcessBuffer* buf = (WaspProcessBuffer*)wasp_malloc(sizeof(WaspProcessBuffer));
+    WaspProcessBuffer* buf = WASP_MALLOC(WaspProcessBuffer*, sizeof(WaspProcessBuffer));
     if (!buf) return NULL;
     memset(buf, 0, sizeof(*buf));
 
@@ -818,29 +824,49 @@ WaspProcessBuffer* wasp_process_buffer_create(WaspInstance* instance,
     buf->num_channels   = num_channels;
     buf->sample_rate    = instance->sample_rate;
 
-    buf->pending_events = (WaspEvent*)wasp_malloc(max_events * sizeof(WaspEvent));
+    buf->pending_events = WASP_MALLOC(WaspEvent*, max_events * sizeof(WaspEvent));
     if (!buf->pending_events) { free(buf); return NULL; }
 
     /* lay out WASM memory starting at WASP_WASM_BASE_OFFSET:
-     *   [ch0 floats] [ch1 floats] ... [channel offset table] [events] */
+     *   [out ch0 floats] [out ch1 floats] ... [out channel table]
+     *   [in  ch0 floats] [in  ch1 floats] ... [in  channel table]
+     *   [events] */
     uint32_t offset = WASP_WASM_BASE_OFFSET;
 
+    /* output channel buffers */
     for (uint32_t i = 0; i < num_channels; i++) {
-        buf->ch_offsets[i] = offset;
+        buf->out_ch_offsets[i] = offset;
         offset += max_block_size * sizeof(float);
     }
 
-    buf->ch_table_offset = offset;
+    /* output channel offset table */
+    buf->out_ch_table_offset = offset;
     offset += num_channels * sizeof(uint32_t);
 
+    /* input channel buffers */
+    for (uint32_t i = 0; i < num_channels; i++) {
+        buf->in_ch_offsets[i] = offset;
+        offset += max_block_size * sizeof(float);
+    }
+
+    /* input channel offset table */
+    buf->in_ch_table_offset = offset;
+    offset += num_channels * sizeof(uint32_t);
+
+    /* events buffer */
     buf->events_offset = offset;
 
-    /* write the channel offset table into WASM memory once */
+    /* write channel tables into WASM memory */
     wasmtime_context_t* ctx = wasmtime_store_context(instance->engine->store);
     uint8_t* wasm_mem = wasmtime_memory_data(ctx, &instance->memory);
-    uint32_t* ch_table = (uint32_t*)(wasm_mem + buf->ch_table_offset);
+
+    uint32_t* out_table = (uint32_t*)(wasm_mem + buf->out_ch_table_offset);
     for (uint32_t i = 0; i < num_channels; i++)
-        ch_table[i] = buf->ch_offsets[i];
+        out_table[i] = buf->out_ch_offsets[i];
+
+    uint32_t* in_table = (uint32_t*)(wasm_mem + buf->in_ch_table_offset);
+    for (uint32_t i = 0; i < num_channels; i++)
+        in_table[i] = buf->in_ch_offsets[i];
 
     return buf;
 }
@@ -871,42 +897,57 @@ void wasp_process_buffer_commit(WaspProcessBuffer* buf) {
 
     WaspInstance* inst = buf->instance;
 
-    /* sort events by sample offset */
     sort_events(buf->pending_events, buf->pending_count);
 
-    /* write events into WASM memory */
     wasmtime_context_t* ctx = wasmtime_store_context(inst->engine->store);
     uint8_t* wasm_mem = wasmtime_memory_data(ctx, &inst->memory);
 
+    // write events
     WaspEvent* wasm_events = (WaspEvent*)(wasm_mem + buf->events_offset);
     memcpy(wasm_events, buf->pending_events,
            buf->pending_count * sizeof(WaspEvent));
 
-    /* write the WaspProcessContext */
+    // write context
     WaspProcessContext* pctx = (WaspProcessContext*)(wasm_mem + inst->ctx_offset);
-    pctx->inputs_offset     = 0;
-    pctx->outputs_offset    = buf->ch_table_offset;
-    pctx->input_count       = 0;
-    pctx->output_count      = buf->num_channels;
-    pctx->frames            = buf->current_frames;
-    pctx->sample_rate       = buf->sample_rate;
-    pctx->events_offset     = buf->events_offset;
-    pctx->event_count       = buf->pending_count;
-    pctx->transport         = buf->current_transport;
+    pctx->inputs_offset  = buf->in_ch_table_offset;
+    pctx->outputs_offset = buf->out_ch_table_offset;
+    pctx->input_count    = buf->num_channels;
+    pctx->output_count   = buf->num_channels;
+    pctx->frames         = buf->current_frames;
+    pctx->sample_rate    = buf->sample_rate;
+    pctx->events_offset  = buf->events_offset;
+    pctx->event_count    = buf->pending_count;
+    pctx->transport      = buf->current_transport;
 }
 
-float* wasp_process_buffer_get_channel(WaspProcessBuffer* buf, uint32_t channel) {
+float* wasp_process_buffer_get_input_channel(WaspProcessBuffer* buf, uint32_t channel) {
     if (!buf || channel >= buf->num_channels) return NULL;
     wasmtime_context_t* ctx = wasmtime_store_context(buf->instance->engine->store);
     uint8_t* wasm_mem = wasmtime_memory_data(ctx, &buf->instance->memory);
-    return (float*)(wasm_mem + buf->ch_offsets[channel]);
+    return (float*)(wasm_mem + buf->in_ch_offsets[channel]);
+}
+
+float* wasp_process_buffer_get_output_channel(WaspProcessBuffer* buf, uint32_t channel) {
+    if (!buf || channel >= buf->num_channels) return NULL;
+    wasmtime_context_t* ctx = wasmtime_store_context(buf->instance->engine->store);
+    uint8_t* wasm_mem = wasmtime_memory_data(ctx, &buf->instance->memory);
+    return (float*)(wasm_mem + buf->out_ch_offsets[channel]);
 }
 
 uint32_t wasp_process_buffer_channel_count(const WaspProcessBuffer* buf) {
     return buf ? buf->num_channels : 0;
 }
 
-/* ── Instance process (defined here so it can use WaspProcessBuffer) ─────── */
+void wasp_process_buffer_debug(const WaspProcessBuffer* buf) {
+    if (!buf) return;
+    fprintf(stderr, "WaspProcessBuffer:\n");
+    fprintf(stderr, "  instance ctx_offset:  %u\n", buf->instance->ctx_offset);
+    fprintf(stderr, "  out_ch_table_offset:  %u\n", buf->out_ch_table_offset);
+    fprintf(stderr, "  in_ch_table_offset:   %u\n", buf->in_ch_table_offset);
+    fprintf(stderr, "  events_offset:        %u\n", buf->events_offset);
+    fprintf(stderr, "  out_ch_offsets[0]:    %u\n", buf->out_ch_offsets[0]);
+    fprintf(stderr, "  in_ch_offsets[0]:     %u\n", buf->in_ch_offsets[0]);
+}
 
 WaspError wasp_instance_process(WaspInstance* inst, WaspProcessBuffer* buffer) {
     if (!inst || !buffer) return WASP_ERROR_INVALID_ARGUMENT;

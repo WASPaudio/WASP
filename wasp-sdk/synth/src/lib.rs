@@ -328,9 +328,10 @@ fn get_or_alloc_process_buffer() -> u32 {
 static PLUGIN: OnceLock<Mutex<Plugin>> = OnceLock::new();
 
 #[unsafe(no_mangle)]
-pub extern "C" fn wasp_initialize(sample_rate: i32, _max_block_size: i32) {
+pub extern "C" fn wasp_initialize(sample_rate: i32, _max_block_size: i32) -> i32 {
     PLUGIN.get_or_init(|| Mutex::new(Plugin::new(sample_rate as f32)));
     get_or_alloc_process_buffer();
+    1
 }
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,47 @@
+{
+  "name": "Clipper",
+  "uniqueId": "audio.wasp.clipper",
+  "version": "0.1.0",
+  "author": "WASP Audio",
+  "description": "Hard clipper with pregain and output gain",
+  "type": "effect",
+  "category": "distortion",
+  "inputs": 2,
+  "outputs": 2,
+  "extensions": [
+    "wasp.transport"
+  ],
+  "permissions": [],
+  "parameters": [
+    {
+      "id": 0,
+      "name": "Pre Gain",
+      "description": "Input gain before clipping",
+      "type": "float",
+      "min": 0.0,
+      "max": 10.0,
+      "default": 1.0,
+      "visible": true
+    },
+    {
+      "id": 1,
+      "name": "Threshold",
+      "description": "Clip level",
+      "type": "float",
+      "min": 0.001,
+      "max": 1.0,
+      "default": 0.5,
+      "visible": true
+    },
+    {
+      "id": 2,
+      "name": "Out Gain",
+      "description": "Output gain after clipping",
+      "type": "float",
+      "min": 0.0,
+      "max": 2.0,
+      "default": 1.0,
+      "visible": true
+    }
+  ]
+}

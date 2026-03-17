@@ -1,0 +1,68 @@
+{
+  "name": "Synth",
+  "uniqueId": "audio.wasp.synth",
+  "description": "An awesome synthesizer",
+  "icon": "icon.png",
+  "version": "0.1.0",
+  "author": "WASP Audio",
+  "type": "instrument",
+  "category": "synthesizer",
+  "inputs": 0,
+  "outputs": 17,
+  "ui": "ui/index.html",
+  "permissions": [
+    "storage.own",
+    "storage.domain",
+    "network.internet",
+    "files.read"
+  ],
+  "extensions": ["wasp.midi", "wasp.gui", "wasp.state"],
+  "parameters": [
+    {
+      "id": 0,
+      "name": "Waveform",
+      "type": "enum",
+      "values": ["Sine", "Square", "Sawtooth", "Triangle"],
+      "min": 0,
+      "max": 3,
+      "default": 0,
+      "visible": true
+    },
+    {
+      "id": 1,
+      "name": "Attack",
+      "type": "float",
+      "min": 0.001,
+      "max": 2.0,
+      "default": 0.01,
+      "visible": true
+    },
+    {
+      "id": 2,
+      "name": "Decay",
+      "type": "float",
+      "min": 0.001,
+      "max": 2.0,
+      "default": 0.1,
+      "visible": true
+    },
+    {
+      "id": 3,
+      "name": "Sustain",
+      "type": "float",
+      "min": 0.0,
+      "max": 1.0,
+      "default": 0.7,
+      "visible": true
+    },
+    {
+      "id": 4,
+      "name": "Release",
+      "type": "float",
+      "min": 0.001,
+      "max": 2.0,
+      "default": 0.3,
+      "visible": true
+    }
+  ]
+}

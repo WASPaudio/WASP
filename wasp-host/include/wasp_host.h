@@ -16,6 +16,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#ifdef __cplusplus //TODO: bit of a hacky fix done purely for CARLA
+#define WASP_MALLOC(type, size) (type*)malloc(size)
+#else
+#define WASP_MALLOC(type, size) malloc(size)
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -305,16 +311,25 @@ bool wasp_process_buffer_add_event(WaspProcessBuffer* buffer, WaspEvent event);
 void wasp_process_buffer_commit(WaspProcessBuffer* buffer);
 
 /*
+* Returns a pointer to the input buffer for the given channel.
+* Write into this before calling wasp_process_buffer_commit.
+*/
+float* wasp_process_buffer_get_input_channel(WaspProcessBuffer* buffer, uint32_t channel);
+
+/*
  * Returns a pointer to the output samples for the given channel
  * after wasp_instance_process has been called.
  * The pointer is valid until the next call to wasp_process_buffer_begin.
  */
-float* wasp_process_buffer_get_channel(WaspProcessBuffer* buffer, uint32_t channel);
+float* wasp_process_buffer_get_output_channel(WaspProcessBuffer* buffer, uint32_t channel);
 
 /*
  * Returns the number of channels this buffer was created with.
  */
 uint32_t wasp_process_buffer_channel_count(const WaspProcessBuffer* buffer);
+
+/* Prints layout info for a process buffer to stderr. For debugging only. */
+void wasp_process_buffer_debug(const WaspProcessBuffer* buffer);
 
 /* ── Event Builders ──────────────────────────────────────────────────────── */
 

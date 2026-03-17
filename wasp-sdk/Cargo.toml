@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "wasp-types",
+    "synth",
+    "clipper",
+]
+resolver = "2"
